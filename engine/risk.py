@@ -18,10 +18,11 @@ class BacktestMetrics:
     
 def sharpe_ratio(equity_curve: pd.Series, risk_free_rate: float=0.05) -> float:
     daily_returns = equity_curve.pct_change().dropna()
-    if daily_returns.std() == 0:
+    active_returns = daily_returns[daily_returns != 0]
+    if len(active_returns) < 2 or daily_returns.std() == 0:
         return 0.0
     
-    excess = daily_returns - (risk_free_rate/TRADING_DAYS_PER_YEAR)
+    excess = active_returns - (risk_free_rate/TRADING_DAYS_PER_YEAR)
     return float((excess.mean()/excess.std()) * np.sqrt(TRADING_DAYS_PER_YEAR))
 
 def cagr(equity_curve: pd.Series) -> float:
@@ -71,7 +72,7 @@ def total_return(equity_curve: pd.Series) -> float:
         return 0.0
     return float((equity_curve.iloc[-1] - equity_curve.iloc[0]) / equity_curve.iloc[0])
 
-def computer_metrics(
+def compute_metrics(
     trades_df: pd.DataFrame,
     equity_curve: pd.Series,
     risk_free_rate: float = 0.05

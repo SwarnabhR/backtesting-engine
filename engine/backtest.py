@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd 
-from risk import computer_metrics, BacktestMetrics
+from risk import compute_metrics, BacktestMetrics
 
 class Backtest:
     def __init__(self, initial: float=10000, position_size: int=1) -> None:
@@ -46,6 +46,6 @@ class Backtest:
         trades_df = pd.DataFrame(trades)
         equity_curve = pd.Series(equity_values, index=df.index[1:])
         
-        metrics = computer_metrics(trades_df, equity_curve)
+        metrics = compute_metrics(trades_df, equity_curve)
         
         return trades_df, equity_curve, metrics
