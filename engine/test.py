@@ -1,17 +1,18 @@
-from data import fetch
-from strategy import EMACrossover, RSIMeanReversion, BollingerBreakout
+
 from backtest import Backtest
+from strategy import EMACrossover
+import yfinance as yf 
 
-df = fetch('AAPL', '2020-01-01', '2021-01-01')
+df = yf.download("RELIANCE.NS", start="2024-01-01", end="2025-01-01")
+df.columns = [c[0].lower() for c in df.columns]
 
-strategies = [
-    EMACrossover(12, 26),
-    RSIMeanReversion(30, 70),
-    BollingerBreakout(20, 2)
-]
+bt = Backtest(initial=100_000)
 
-for strat in strategies:
-    entries, exits = strat.generate_signals(df)
-    print(f"{strat.__class__.__name__}")
-    print(f"Entries: {entries.sum()}")
-    print(f"Exits: {exits.sum()}")
+trades, equity, m = bt.run(df, EMACrossover())
+
+print(f"{m.sharpe_ratio:.2f}")
+print(f"{m.cagr}")
+print(f"{m.max_drawdown_pct}")
+print(f"{m.win_rate}")
+print(f"{m.total_trades}")
+print(f"{m.total_return_pct}")

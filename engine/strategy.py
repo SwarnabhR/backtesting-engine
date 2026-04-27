@@ -17,7 +17,7 @@ class EMACrossover(Strategy):
         fast_ema = ema(close, self.fast)
         slow_ema = ema(close, self.slow)
         
-        entries = (fast_ema > slow_ema) & (fast_ema.shift(1) >= slow_ema.shift(1))
+        entries = (fast_ema > slow_ema) & (fast_ema.shift(1) <= slow_ema.shift(1))
         exits = (fast_ema < slow_ema) & (fast_ema.shift(1) >= slow_ema.shift(1))
         return entries, exits
     
