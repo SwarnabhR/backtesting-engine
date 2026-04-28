@@ -10,11 +10,12 @@ Built in pure Python/Pandas — no `backtrader`, no `vectorbt`.
 ```
 engine/
 ├── data.py            # yfinance OHLCV fetcher, normalises columns
-├── indicators.py      # EMA, RSI, MACD, Bollinger Bands, VWAP, trend_regime
+├── indicators.py      # EMA, RSI, MACD, Bollinger, ATR, VWAP, trend_regime
 ├── strategy.py        # 12 strategy classes (long-only, long/short, regime-filtered)
-├── backtest.py        # Event-driven engine, supports 2-tuple and 4-tuple signal contracts
+├── backtest.py        # Event-driven engine, 2-tuple and 4-tuple signal contracts
 ├── risk.py            # Sharpe, CAGR, max drawdown, win rate, total return
-├── optimizer.py       # GridOptimizer — brute-force grid search with constraint support
+├── sizer.py           # FixedSizer, PercentEquitySizer, ATRSizer, KellySizer
+├── optimizer.py       # GridOptimizer — brute-force grid search + constraint support
 ├── walk_forward.py    # WalkForwardValidator — anchored & rolling window modes
 └── test.py            # End-to-end runner
 ```
@@ -50,15 +51,47 @@ slope = (MA_now − MA_20_bars_ago) / MA_20_bars_ago
   NaN  →  neutral (0)
 ```
 
-This avoids whipsaw during sideways markets where price oscillates around a flat MA.
-Exits are always unfiltered — once in a trade the original exit signal always applies.
+Exits are always unfiltered — once in a trade the original exit signal applies.
+
+---
+
+## Position Sizing
+
+All four sizers live in `sizer.py` and share the `PositionSizer` interface:
+
+```python
+sizer.size(equity: float, bar: pd.Series) -> int
+```
+
+| Sizer | Formula | Best for |
+|---|---|---|
+| `FixedSizer(shares=1)` | Always N shares | Baseline / legacy compat |
+| `PercentEquitySizer(pct=0.10)` | `floor(equity × pct / close)` | Simple capital allocation |
+| `ATRSizer(risk_pct=0.01, atr_mult=2.0)` | `floor(equity × risk_pct / (atr_mult × ATR))` | Professional risk-per-trade sizing |
+| `KellySizer.from_trades(trades_df, fraction=0.5)` | Half-Kelly optimal fraction | Theory-optimal, high variance |
+
+### ATRSizer setup
+
+Pre-attach the `"atr"` column to your DataFrame before running:
+
+```python
+from indicators import atr
+df["atr"] = atr(df, period=14)
+
+bt = Backtest(initial=100_000, sizer=ATRSizer(risk_pct=0.01, atr_mult=2.0))
+```
+
+### Backward compatibility
+
+`position_size=N` still works and is silently converted to `FixedSizer(N)`:
+
+```python
+Backtest(initial=100_000, position_size=1)   # identical to FixedSizer(1)
+```
 
 ---
 
 ## Signal Contract
-
-Strategies return either a **2-tuple** (long-only) or **4-tuple** (long/short).
-The engine auto-detects which mode to use — no code change needed.
 
 ```python
 # Long-only
@@ -77,58 +110,59 @@ def generate_signals(df) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
 > Buy-and-hold returned **~42%** over this period.  
 > Negative Sharpe = underperformance vs risk-free rate (5%), not a loss.
 
-### Default Parameters
+### Default Parameters (FixedSizer, 1 share)
 
-| Strategy | Sharpe | CAGR | Max DD | Win Rate | Trades |
-|---|---|---|---|---|---|
-| EMA Crossover | −0.87 | 1.69% | −2.18% | 45.5% | 11 |
-| RSI Mean Reversion | −1.23 | 0.35% | −1.74% | 71.4% | 7 |
-| Bollinger Breakout | −1.14 | 0.50% | −2.80% | 55.6% | 9 |
-| MACD Crossover | −1.04 | 1.14% | −2.05% | 32.1% | 28 |
+| Strategy | Mode | Sharpe | CAGR | Max DD | Win Rate | Trades |
+|---|---|---|---|---|---|---|
+| EMA Crossover | Long-only | −0.87 | 1.69% | −2.18% | 45.5% | 11 |
+| EMA Crossover | Long/short | −1.29 | 1.46% | −2.53% | 42.9% | 21 |
+| EMA Crossover | **Regime-filtered** | **−0.53** | **1.61%** | **−2.18%** | **50.0%** | 6 |
+| RSI Mean Reversion | Long-only | −1.23 | 0.35% | −1.74% | 71.4% | 7 |
+| RSI Mean Reversion | Long/short | −2.09 | −0.80% | −6.46% | 57.1% | 14 |
+| RSI Mean Reversion | **Regime-filtered** | **−1.40** | **0.23%** | **−1.13%** | **100%** | 4 |
+| Bollinger Breakout | Long-only | −1.14 | 0.50% | −2.80% | 55.6% | 9 |
+| Bollinger Breakout | Long/short | −2.25 | −0.61% | −4.67% | 35.0% | 20 |
+| Bollinger Breakout | **Regime-filtered** | −1.86 | −0.11% | −2.85% | 37.5% | 8 |
+| MACD Crossover | Long-only | −1.04 | 1.14% | −2.05% | 32.1% | 28 |
+| MACD Crossover | Long/short | −1.71 | 0.35% | −5.75% | 30.9% | 55 |
+| MACD Crossover | **Regime-filtered** | −1.58 | 0.26% | −2.11% | 27.3% | 22 |
 
-### After Grid-Search Optimisation
+### Key Findings
 
-| Strategy | Best Params | Sharpe | CAGR | Trades |
-|---|---|---|---|---|
-| EMA Crossover | fast=5, slow=26 | −0.76 | 1.86% | 15 |
-| RSI Mean Reversion | period=20, OS=35, OB=70 | −0.54 | 1.13% | 7 |
-| Bollinger Breakout | period=30, std=1 | −0.79 | 1.39% | 14 |
+1. **Regime filter helps EMA and RSI, hurts Bollinger and MACD.**  
+   EMA regime: Sharpe −0.87 → −0.53, DD −2.18% → −2.18%, WR 45% → 50%.  
+   RSI regime: DD cut from −1.74% → −1.13%, win rate jumps to 100% (small sample).
 
-### Long-only vs Long/Short vs Regime-Filtered
+2. **Adding short legs without regime filter always hurts on Nifty 2022–2025.**  
+   RSI LS drawdown: −1.74% → −6.46%. Bollinger LS win rate collapses to 35%.
 
-**Key finding:** Nifty 50 is a strong bull-market index (2022–2025). Adding
-short legs without a regime filter **hurts every strategy** — RSI LS drawdown
-jumped from −1.74% → −6.46%, Bollinger LS win rate collapsed to 35%.
-The regime filter suppresses short entries during bull phases, recovering most
-of the damage.
+3. **All strategies underperform buy-and-hold on this bull-market dataset.**  
+   Rule-based systems without ML or execution edge are expected to lag a
+   strongly directional index. The value is in drawdown control, not alpha.
 
-| Strategy | Mode | Sharpe | CAGR | Max DD |
-|---|---|---|---|---|
-| EMA | Long-only | −0.87 | 1.69% | −2.18% |
-| EMA | Long/short | −1.29 | 1.46% | −2.53% |
-| EMA | Regime-filtered | _run_ | _run_ | _run_ |
-| RSI | Long-only | −1.23 | 0.35% | −1.74% |
-| RSI | Long/short | −2.09 | −0.80% | −6.46% |
-| RSI | Regime-filtered | _run_ | _run_ | _run_ |
-| Bollinger | Long-only | −1.14 | 0.50% | −2.80% |
-| Bollinger | Long/short | −2.25 | −0.61% | −4.67% |
-| Bollinger | Regime-filtered | _run_ | _run_ | _run_ |
+4. **Walk-forward OOS Sharpe (EMA anchored): −0.996 over 7 folds.**  
+   IS-to-OOS Sharpe degradation is modest (≈1.0–1.2 IS vs ≈0.6–2.6 OOS per fold),
+   indicating mild but real overfitting in the shorter windows.
 
 ---
 
 ## Quick Start
 
 ```python
-from data import fetch
+from indicators import atr
 from strategy import EMACrossoverRegime
 from backtest import Backtest
+from sizer import ATRSizer
 from optimizer import GridOptimizer
 from walk_forward import WalkForwardValidator
+import yfinance as yf
 
-df = fetch("^NSEI", "2019-01-01", "2025-01-01")
+df = yf.download("^NSEI", start="2019-01-01", end="2025-01-01")
+df.columns = [c[0].lower() for c in df.columns]
+df["atr"] = atr(df, period=14)
 
-# Single backtest
-bt = Backtest(initial=100_000)
+# Single backtest with ATR sizing
+bt = Backtest(initial=100_000, sizer=ATRSizer(risk_pct=0.01, atr_mult=2.0))
 trades, equity, metrics = bt.run(df, EMACrossoverRegime())
 print(metrics)
 
@@ -136,63 +170,49 @@ print(metrics)
 opt = GridOptimizer(
     strategy_class=EMACrossoverRegime,
     param_grid={"fast": [5, 8, 12], "slow": [20, 26, 50], "regime_slope": [10, 20]},
-    min_trades=3,
+    min_trades=2,
     constraint=lambda p: p["fast"] < p["slow"],
 )
 print(opt.best(df))
 
-# Walk-forward validation (anchored, 2-yr IS / 6-mo OOS)
+# Walk-forward (regime strategy needs warmup_bars)
 wfv = WalkForwardValidator(
     strategy_class=EMACrossoverRegime,
     param_grid={"fast": [5, 8, 12], "slow": [20, 26, 50], "regime_slope": [10, 20]},
-    is_bars=504, oos_bars=126, anchored=True,
+    is_bars=378, oos_bars=252, warmup_bars=200, anchored=False,
     constraint=lambda p: p["fast"] < p["slow"],
 )
 result = wfv.run(df)
-print(result)             # OOS aggregate metrics
-print(result.summary)    # per-fold detail
+print(result)
+print(result.summary)
 ```
 
 ---
 
 ## Walk-Forward Validation
 
-`WalkForwardValidator` prevents curve-fitting by verifying that IS-optimal
-parameters generalise to unseen OOS data.
-
-### Window Modes
-
 | Mode | IS window | Best for |
 |---|---|---|
-| `anchored=True` | Grows with each fold (always starts at bar 0) | Trend strategies needing max history |
-| `anchored=False` | Fixed-length sliding window | Mean-reversion where recent data matters more |
+| `anchored=True` | Grows each fold (starts at bar 0) | Trend strategies |
+| `anchored=False` | Fixed-length sliding window | Mean-reversion |
 
-### Output
-
-```
-WalkForwardResult(4 folds | OOS sharpe=X.XXX, cagr=X.XX%, dd=-X.XX%, wr=XX.XX%, trades=N)
-```
-
-`result.summary` — DataFrame with one row per fold:
-
-| fold | is_start | is_end | oos_start | oos_end | params_fast | params_slow | is_sharpe | oos_sharpe | oos_cagr | oos_max_dd | oos_win_rate | oos_trades |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | 2019-01 | 2021-01 | 2021-01 | 2021-07 | 8 | 26 | −0.60 | −0.72 | 1.2% | −1.8% | 50% | 4 |
-| ... |
+**`warmup_bars`** pads every IS slice so indicators with long lookbacks
+(e.g. 200-bar SMA) have valid values from the first usable bar.  
+The OOS window always receives the tail of the IS slice as warmup context.
 
 ---
 
 ## Roadmap
 
 - [x] Data fetching (`data.py`)
-- [x] Core indicators: EMA, RSI, MACD, Bollinger, VWAP, trend regime
+- [x] Core indicators: EMA, RSI, MACD, Bollinger, ATR, VWAP, trend regime
 - [x] Long-only strategies (EMA, RSI, Bollinger, MACD)
 - [x] Long/short strategies
 - [x] Regime-filtered strategies
 - [x] Grid-search optimiser with constraint support
-- [x] Walk-forward validation (anchored + rolling)
-- [ ] Position sizing: % equity, ATR-based stops
-- [ ] Results visualisation: equity curve, drawdown chart
+- [x] Walk-forward validation (anchored + rolling, warmup-aware)
+- [x] Position sizing: FixedSizer, PercentEquity, ATR-based, Kelly
+- [ ] Results visualisation: equity curve, drawdown chart, per-fold OOS plot
 - [ ] `pytest` unit test suite with synthetic OHLCV fixtures
 - [ ] Commission / slippage model
 

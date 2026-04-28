@@ -44,6 +44,40 @@ def bollinger_bands(
     return upper, middle, lower
 
 
+def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """
+    Average True Range.
+
+    True Range = max(high-low, |high-prev_close|, |low-prev_close|)
+    ATR        = EMA(TR, period)
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Must contain columns ``"high"``, ``"low"``, ``"close"``.
+    period : int
+        Smoothing period (default 14).
+
+    Returns
+    -------
+    pd.Series  aligned to df.index, NaN for first ``period`` bars.
+    """
+    period = int(period)
+    high  = df["high"]
+    low   = df["low"]
+    close = df["close"]
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [
+            high - low,
+            (high - prev_close).abs(),
+            (low  - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    return tr.ewm(span=period, adjust=False).mean()
+
+
 def vwap(df: pd.DataFrame) -> pd.Series:
     typical_price = (df["high"] + df["low"] + df["close"]) / 3
     return (
@@ -63,15 +97,12 @@ def trend_regime(
     Method
     ------
     1. Compute a simple moving average of length *ma_period*.
-    2. Measure the MA’s slope over the last *slope_period* bars as a
+    2. Measure the MA's slope over the last *slope_period* bars as a
        percentage:  slope = (MA_now - MA_n_bars_ago) / MA_n_bars_ago
     3. Threshold:
-         slope >  0  → bull  (+1)  — MA is rising
-         slope <  0  → bear  (-1)  — MA is falling
-         NaN (warmup period) → neutral (0)
-
-    Using the *slope* rather than a raw price-vs-MA comparison avoids
-    whipsaw during sideways markets where price oscillates around a flat MA.
+         slope >  0  -> bull  (+1)  -- MA is rising
+         slope <  0  -> bear  (-1)  -- MA is falling
+         NaN (warmup period) -> neutral (0)
 
     Parameters
     ----------
@@ -86,15 +117,10 @@ def trend_regime(
     -------
     pd.Series of int  {-1, 0, +1}  aligned to *series* index.
     """
-    # Explicit int() casts guard against float values arriving from the
-    # optimizer's Cartesian product (e.g. 10.0 instead of 10), which
-    # would cause pd.Series.shift() to raise TypeError.
-    ma_period   = int(ma_period)
+    ma_period    = int(ma_period)
     slope_period = int(slope_period)
-
     ma = series.rolling(window=ma_period).mean()
     slope = (ma - ma.shift(slope_period)) / ma.shift(slope_period)
-
     regime = pd.Series(0, index=series.index, dtype=int)
     regime[slope > 0] = 1
     regime[slope < 0] = -1
