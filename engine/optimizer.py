@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import itertools
-from dataclasses import dataclass, field
-from typing import Any, Type
+from dataclasses import dataclass
+from typing import Any, Callable, Type
 
 import pandas as pd
 
@@ -36,6 +36,17 @@ class OptimizationResult:
             "total_return_pct": self.total_return_pct,
         }
 
+    def __repr__(self) -> str:
+        p = ", ".join(f"{k}={v}" for k, v in self.params.items())
+        return (
+            f"OptimizationResult({p} | "
+            f"sharpe={self.sharpe_ratio:.3f}, "
+            f"cagr={self.cagr:.2%}, "
+            f"dd={self.max_drawdown_pct:.2%}, "
+            f"wr={self.win_rate:.2%}, "
+            f"trades={self.total_trades})"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Core optimizer
@@ -58,7 +69,12 @@ class GridOptimizer:
         Shares per trade passed to :class:`Backtest`.
     min_trades : int
         Discard results with fewer trades than this threshold (avoids
-        over-fitted curves that only have 1-2 lucky trades).
+        over-fitted curves with only 1-2 lucky trades).
+    constraint : Callable[[dict], bool] | None
+        Optional function that takes a param dict and returns True if the
+        combination is valid.  Use this to enforce relationships between
+        params (e.g. ``lambda p: p["fast"] < p["slow"]``).  Invalid
+        combinations are skipped before any backtest is run.
     """
 
     def __init__(
@@ -68,12 +84,14 @@ class GridOptimizer:
         initial: float = 10_000,
         position_size: int = 1,
         min_trades: int = 3,
+        constraint: Callable[[dict], bool] | None = None,
     ) -> None:
         self.strategy_class = strategy_class
         self.param_grid = param_grid
         self.initial = initial
         self.position_size = position_size
         self.min_trades = min_trades
+        self.constraint = constraint
 
     # ------------------------------------------------------------------
     # Public API
@@ -93,15 +111,15 @@ class GridOptimizer:
         df : pd.DataFrame
             OHLCV data as returned by :func:`data.fetch`.
         sort_by : str
-            Column used for ranking.  Valid values: ``"sharpe_ratio"``,
-            ``"cagr"``, ``"total_return_pct"``, ``"win_rate"``.
+            Column to rank by. One of: ``"sharpe_ratio"``, ``"cagr"``,
+            ``"total_return_pct"``, ``"win_rate"``.
         ascending : bool
             Sort direction.  Default ``False`` (best first).
 
         Returns
         -------
         pd.DataFrame
-            One row per parameter combination, sorted by *sort_by*.
+            One row per valid parameter combination, sorted by *sort_by*.
         """
         valid_sort = {"sharpe_ratio", "cagr", "total_return_pct", "win_rate"}
         if sort_by not in valid_sort:
@@ -111,6 +129,8 @@ class GridOptimizer:
         results: list[OptimizationResult] = []
 
         for params in combinations:
+            if self.constraint is not None and not self.constraint(params):
+                continue
             result = self._evaluate(df, params)
             if result is not None:
                 results.append(result)
@@ -151,12 +171,12 @@ class GridOptimizer:
         params = {col: top[col] for col in param_cols}
         return OptimizationResult(
             params=params,
-            sharpe_ratio=top["sharpe_ratio"],
-            cagr=top["cagr"],
-            max_drawdown_pct=top["max_drawdown_pct"],
-            win_rate=top["win_rate"],
+            sharpe_ratio=float(top["sharpe_ratio"]),
+            cagr=float(top["cagr"]),
+            max_drawdown_pct=float(top["max_drawdown_pct"]),
+            win_rate=float(top["win_rate"]),
             total_trades=int(top["total_trades"]),
-            total_return_pct=top["total_return_pct"],
+            total_return_pct=float(top["total_return_pct"]),
         )
 
     # ------------------------------------------------------------------
@@ -164,13 +184,25 @@ class GridOptimizer:
     # ------------------------------------------------------------------
 
     def _build_combinations(self) -> list[dict[str, Any]]:
-        """Cartesian product of all param_grid values."""
+        """Cartesian product of param_grid values, cast to native Python types."""
         keys = list(self.param_grid.keys())
         value_lists = [self.param_grid[k] for k in keys]
-        return [
-            dict(zip(keys, combo))
-            for combo in itertools.product(*value_lists)
-        ]
+        combos = []
+        for combo in itertools.product(*value_lists):
+            # Cast numpy scalars / floats-that-should-be-ints back to int/float
+            # so strategy constructors receive the expected types.
+            native = {}
+            for k, v in zip(keys, combo):
+                if isinstance(v, float) and v == int(v):
+                    native[k] = int(v)
+                else:
+                    # covers numpy scalar types (np.int64, np.float64, etc.)
+                    try:
+                        native[k] = v.item()  # numpy scalar -> Python scalar
+                    except AttributeError:
+                        native[k] = v         # already a plain Python type
+            combos.append(native)
+        return combos
 
     def _evaluate(
         self, df: pd.DataFrame, params: dict[str, Any]
@@ -189,7 +221,7 @@ class GridOptimizer:
             trades_df, equity_curve, metrics = bt.run(df, strategy)
         except Exception:
             # Silently skip parameter combos that cause runtime errors
-            # (e.g., slow < fast for EMA, degenerate edge cases).
+            # (e.g., slow <= fast for EMA, degenerate edge cases).
             return None
 
         if metrics.total_trades < self.min_trades:
@@ -197,10 +229,10 @@ class GridOptimizer:
 
         return OptimizationResult(
             params=params,
-            sharpe_ratio=metrics.sharpe_ratio,
-            cagr=metrics.cagr,
-            max_drawdown_pct=metrics.max_drawdown_pct,
-            win_rate=metrics.win_rate,
-            total_trades=metrics.total_trades,
-            total_return_pct=metrics.total_return_pct,
+            sharpe_ratio=float(metrics.sharpe_ratio),
+            cagr=float(metrics.cagr),
+            max_drawdown_pct=float(metrics.max_drawdown_pct),
+            win_rate=float(metrics.win_rate),
+            total_trades=int(metrics.total_trades),
+            total_return_pct=float(metrics.total_return_pct),
         )
