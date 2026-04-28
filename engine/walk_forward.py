@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Type
 
 import pandas as pd
@@ -28,28 +28,28 @@ class FoldResult:
 
     def as_dict(self) -> dict:
         return {
-            "fold":             self.fold,
-            "is_start":         self.in_sample_start.date(),
-            "is_end":           self.in_sample_end.date(),
-            "oos_start":        self.out_sample_start.date(),
-            "oos_end":          self.out_sample_end.date(),
+            "fold":          self.fold,
+            "is_start":      self.in_sample_start.date(),
+            "is_end":        self.in_sample_end.date(),
+            "oos_start":     self.out_sample_start.date(),
+            "oos_end":       self.out_sample_end.date(),
             **{f"params_{k}": v for k, v in self.best_params.items()},
-            "is_sharpe":        round(self.in_sample.sharpe_ratio, 3),
-            "is_cagr":          round(self.in_sample.cagr, 4),
-            "oos_sharpe":       round(self.out_sample.sharpe_ratio, 3),
-            "oos_cagr":         round(self.out_sample.cagr, 4),
-            "oos_max_dd":       round(self.out_sample.max_drawdown_pct, 4),
-            "oos_win_rate":     round(self.out_sample.win_rate, 4),
-            "oos_trades":       self.out_sample.total_trades,
+            "is_sharpe":     round(self.in_sample.sharpe_ratio, 3),
+            "is_cagr":       round(self.in_sample.cagr, 4),
+            "oos_sharpe":    round(self.out_sample.sharpe_ratio, 3),
+            "oos_cagr":      round(self.out_sample.cagr, 4),
+            "oos_max_dd":    round(self.out_sample.max_drawdown_pct, 4),
+            "oos_win_rate":  round(self.out_sample.win_rate, 4),
+            "oos_trades":    self.out_sample.total_trades,
         }
 
 
 @dataclass
 class WalkForwardResult:
     folds:            list[FoldResult]
-    oos_equity_curve: pd.Series           # stitched OOS equity curve
-    oos_metrics:      BacktestMetrics     # metrics on the stitched curve
-    summary:          pd.DataFrame        # one row per fold
+    oos_equity_curve: pd.Series
+    oos_metrics:      BacktestMetrics
+    summary:          pd.DataFrame
 
     def __repr__(self) -> str:
         m = self.oos_metrics
@@ -69,67 +69,68 @@ class WalkForwardResult:
 
 class WalkForwardValidator:
     """
-    Anchored walk-forward validation.
+    Anchored or rolling walk-forward validation.
 
-    Splits *df* into sequential folds.  Each fold has an in-sample (IS)
-    window and an out-of-sample (OOS) window immediately after it.
-
-    Two window modes
-    ----------------
+    Window modes
+    ------------
     ``anchored=True``  (default)
-        The IS window always starts at the very first bar and grows with
-        each fold.  Fold 1: IS=[0..n], OOS=[n..n+step].  Fold 2:
-        IS=[0..n+step], OOS=[n+step..n+2*step], etc.
-        Suitable when more history is always better (trend strategies).
+        IS window always starts at bar 0 and grows each fold.
+        Best for trend strategies where more history helps.
 
     ``anchored=False``  (rolling)
-        The IS window is a fixed-length sliding window.  Fold 1:
-        IS=[0..is_bars], OOS=[is_bars..is_bars+oos_bars].  Fold 2:
-        IS=[oos_bars..is_bars+oos_bars], OOS=[is_bars+oos_bars..is_bars+2*oos_bars].
-        Suitable when recent data is more relevant (mean-reversion strategies).
+        IS window is a fixed-length sliding window.
+        Best for mean-reversion where recent data matters more.
+
+    Warmup handling
+    ---------------
+    Some indicators (e.g. 200-bar SMA for trend_regime) need a burn-in
+    period before they emit valid values.  Set ``warmup_bars`` to the
+    longest such lookback.  The IS window will be padded so that
+    ``is_bars`` of *usable* bars remain after warmup is discarded.
+    The OOS slice always starts immediately after the IS window; it reuses
+    the tail of the IS window as its own warmup context, so no OOS bars
+    are wasted.
 
     Parameters
     ----------
     strategy_class : Type[Strategy]
-        Uninstantiated strategy class.
     param_grid : dict[str, list]
-        Parameter grid passed to :class:`GridOptimizer`.
     is_bars : int
-        Number of bars in the in-sample window.
+        Usable (post-warmup) IS bars per fold.
     oos_bars : int
-        Number of bars in each out-of-sample window.
+        OOS bars per fold.
+    warmup_bars : int
+        Indicator warmup bars prepended to every IS slice (default 0).
+        Set to your longest indicator lookback, e.g. 200 for regime filter.
     anchored : bool
-        Window mode (see above). Default True.
     sort_by : str
-        Metric used to select the best IS params.
-        One of ``"sharpe_ratio"``, ``"cagr"``, ``"total_return_pct"``, ``"win_rate"``.
     initial : float
-        Starting capital.
     position_size : int
-        Shares per trade.
     min_trades : int
-        Minimum trades in IS window to accept a parameter set.
+        Minimum IS trades to accept a param set. Default 2 (regime
+        strategies are infrequent; 3 is too strict for short windows).
     constraint : Callable | None
-        Optional constraint lambda forwarded to :class:`GridOptimizer`.
     """
 
     def __init__(
         self,
         strategy_class: Type[Strategy],
         param_grid: dict[str, list],
-        is_bars: int = 504,        # ~2 trading years
-        oos_bars: int = 126,       # ~6 trading months
+        is_bars: int = 504,
+        oos_bars: int = 252,        # default raised to ~1 yr: more OOS trades
+        warmup_bars: int = 0,       # set to longest indicator lookback
         anchored: bool = True,
         sort_by: str = "sharpe_ratio",
         initial: float = 100_000,
         position_size: int = 1,
-        min_trades: int = 3,
+        min_trades: int = 2,        # lowered from 3; regime strategies are sparse
         constraint: Callable[[dict], bool] | None = None,
     ) -> None:
         self.strategy_class = strategy_class
         self.param_grid = param_grid
         self.is_bars = is_bars
         self.oos_bars = oos_bars
+        self.warmup_bars = warmup_bars
         self.anchored = anchored
         self.sort_by = sort_by
         self.initial = initial
@@ -143,19 +144,19 @@ class WalkForwardValidator:
 
     def run(self, df: pd.DataFrame) -> WalkForwardResult:
         """
-        Run walk-forward validation on *df*.
+        Run walk-forward validation.
 
         Returns
         -------
         WalkForwardResult
-            Contains per-fold detail, stitched OOS equity curve, and
-            aggregate OOS metrics.
         """
         folds = self._build_folds(df)
         if not folds:
+            total_needed = self.warmup_bars + self.is_bars + self.oos_bars
             raise ValueError(
                 f"Not enough data for even one fold. "
-                f"Need at least {self.is_bars + self.oos_bars} bars, "
+                f"Need at least {total_needed} bars "
+                f"(warmup={self.warmup_bars} + IS={self.is_bars} + OOS={self.oos_bars}), "
                 f"got {len(df)}."
             )
 
@@ -165,20 +166,32 @@ class WalkForwardValidator:
         running_capital = self.initial
 
         for fold_num, (is_slice, oos_slice) in enumerate(folds, start=1):
-            # 1. Optimise on IS window
+            # 1. Optimise on full IS slice (includes warmup prefix)
             best_params = self._optimise(is_slice)
             if best_params is None:
-                continue  # skip fold if grid yielded no valid results
+                print(f"  [fold {fold_num}] skipped — no param combo met min_trades={self.min_trades}")
+                continue
 
-            # 2. Evaluate IS metrics (for reporting only)
+            # 2. IS metrics (full slice with warmup; warmup bars produce no
+            #    trades so they don't inflate IS numbers)
             is_metrics = self._evaluate(is_slice, best_params)
 
-            # 3. Run OOS with best IS params, capital carries over between folds
+            # 3. OOS: prepend warmup prefix from tail of IS so indicators
+            #    initialise correctly, then run backtest on OOS bars only.
+            #    This is the key fix: without context the 200-bar SMA is NaN
+            #    for the entire short OOS window.
+            oos_with_context = self._oos_with_warmup(is_slice, oos_slice)
             bt = Backtest(initial=running_capital, position_size=self.position_size)
             strategy = self.strategy_class(**best_params)
-            oos_trades, oos_equity, oos_metrics = bt.run(oos_slice, strategy)
+            _, oos_equity_full, _ = bt.run(oos_with_context, strategy)
 
-            # Update running capital for next fold
+            # Trim equity curve back to OOS-only bars
+            oos_equity = oos_equity_full.loc[oos_slice.index[0]:]
+            # Re-run trades/metrics on OOS-only slice for clean reporting
+            bt2 = Backtest(initial=running_capital, position_size=self.position_size)
+            oos_trades, oos_equity2, oos_metrics = bt2.run(oos_slice, strategy)
+            # Use the context-aware equity for the equity curve
+            # but OOS-only metrics for the fold report
             if not oos_equity.empty:
                 running_capital = float(oos_equity.iloc[-1])
 
@@ -187,7 +200,7 @@ class WalkForwardValidator:
 
             fold_results.append(FoldResult(
                 fold=fold_num,
-                in_sample_start=is_slice.index[0],
+                in_sample_start=is_slice.index[self.warmup_bars] if self.warmup_bars else is_slice.index[0],
                 in_sample_end=is_slice.index[-1],
                 out_sample_start=oos_slice.index[0],
                 out_sample_end=oos_slice.index[-1],
@@ -197,17 +210,20 @@ class WalkForwardValidator:
             ))
 
         if not fold_results:
-            raise ValueError("All folds failed — try reducing min_trades or expanding the param grid.")
+            raise ValueError(
+                "All folds were skipped.  Try:\n"
+                "  - Reducing min_trades (currently {self.min_trades})\n"
+                "  - Expanding the param_grid\n"
+                "  - Increasing is_bars or oos_bars"
+            )
 
-        # Stitch OOS equity curve (re-base each segment to end of previous)
         stitched = self._stitch_equity(oos_equity_segments)
-
-        # Compute aggregate metrics on stitched curve
-        all_trades_df = pd.concat(
-            [t for t in all_trades if not t.empty], ignore_index=True
-        ) if any(not t.empty for t in all_trades) else pd.DataFrame()
+        all_trades_df = (
+            pd.concat([t for t in all_trades if not t.empty], ignore_index=True)
+            if any(not t.empty for t in all_trades)
+            else pd.DataFrame()
+        )
         aggregate_metrics = compute_metrics(all_trades_df, stitched)
-
         summary = pd.DataFrame([f.as_dict() for f in fold_results])
 
         return WalkForwardResult(
@@ -218,38 +234,61 @@ class WalkForwardValidator:
         )
 
     # ------------------------------------------------------------------
-    # Helpers
+    # Fold builder
     # ------------------------------------------------------------------
 
     def _build_folds(
         self, df: pd.DataFrame
     ) -> list[tuple[pd.DataFrame, pd.DataFrame]]:
-        """Return list of (in_sample_df, oos_df) slices."""
+        """
+        Build (is_slice, oos_slice) pairs.
+
+        is_slice always contains warmup_bars + is_bars rows so indicators
+        have enough history.  oos_slice is purely the OOS window; the
+        caller prepends warmup context separately.
+        """
         folds = []
         n = len(df)
-        start = 0
+        total_is = self.warmup_bars + self.is_bars
 
+        fold_idx = 0
         while True:
             if self.anchored:
-                is_end = self.is_bars + (len(folds) * self.oos_bars)
+                is_start = 0
+                is_end   = total_is + fold_idx * self.oos_bars
             else:
-                is_start = len(folds) * self.oos_bars
-                is_end   = is_start + self.is_bars
-                start    = is_start
+                is_start = fold_idx * self.oos_bars
+                is_end   = is_start + total_is
 
-            oos_end = is_end + self.oos_bars
+            oos_start = is_end
+            oos_end   = oos_start + self.oos_bars
 
             if oos_end > n:
                 break
 
-            is_slice  = df.iloc[start:is_end]
-            oos_slice = df.iloc[is_end:oos_end]
-            folds.append((is_slice, oos_slice))
+            folds.append((df.iloc[is_start:is_end], df.iloc[oos_start:oos_end]))
+            fold_idx += 1
 
         return folds
 
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _oos_with_warmup(
+        self, is_slice: pd.DataFrame, oos_slice: pd.DataFrame
+    ) -> pd.DataFrame:
+        """
+        Prepend the last ``warmup_bars`` rows of IS to OOS so that
+        indicators initialise correctly on the OOS window.
+        If warmup_bars == 0, returns oos_slice unchanged.
+        """
+        if self.warmup_bars == 0:
+            return oos_slice
+        context = is_slice.iloc[-self.warmup_bars:]
+        return pd.concat([context, oos_slice])
+
     def _optimise(self, is_df: pd.DataFrame) -> dict[str, Any] | None:
-        """Run grid search on IS slice and return best params dict."""
         opt = GridOptimizer(
             strategy_class=self.strategy_class,
             param_grid=self.param_grid,
@@ -264,7 +303,6 @@ class WalkForwardValidator:
     def _evaluate(
         self, df: pd.DataFrame, params: dict[str, Any]
     ) -> BacktestMetrics:
-        """Run a single backtest and return its metrics."""
         bt = Backtest(initial=self.initial, position_size=self.position_size)
         strategy = self.strategy_class(**params)
         _, _, metrics = bt.run(df, strategy)
@@ -272,10 +310,6 @@ class WalkForwardValidator:
 
     @staticmethod
     def _stitch_equity(segments: list[pd.Series]) -> pd.Series:
-        """
-        Concatenate equity segments so that each segment starts where
-        the previous one ended (avoids jumps from capital carry-over).
-        """
         if not segments:
             return pd.Series(dtype=float)
         return pd.concat([s for s in segments if not s.empty])
