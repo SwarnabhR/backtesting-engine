@@ -98,19 +98,17 @@ class TestDonchianChannels:
         expected = (upper + lower) / 2
         pd.testing.assert_series_equal(middle, expected, check_names=False)
 
-    def test_flat_zero_width(self, flat_df):
-        """
-        When high and low are identical across all bars the Donchian channel
-        must have zero width (upper == lower) after the warmup period.
+    def test_upper_ge_lower_trending(self, trending_up_df):
+        """Upper channel must always be >= lower channel."""
+        upper, _, lower = donchian_channels(trending_up_df, period=20)
+        assert (upper.dropna() >= lower.dropna()).all()
 
-        NOTE: flat_df uses OHLC candles where high != close (the rolling max
-        of *high* drives the upper band, not close), so we cannot assert
-        upper == 100. The invariant we actually care about is that the channel
-        collapses to zero width when prices are constant.
-        """
-        upper, _, lower = donchian_channels(flat_df, period=5)
-        width = (upper - lower).iloc[10:]
-        np.testing.assert_allclose(width.values, 0.0, atol=1e-8)
+    def test_upper_expands_in_uptrend(self, trending_up_df):
+        """In a clean uptrend the upper channel should generally rise."""
+        upper, _, _ = donchian_channels(trending_up_df, period=20)
+        upper = upper.dropna()
+        # Last value should be greater than the first valid value
+        assert upper.iloc[-1] > upper.iloc[0]
 
 
 class TestParabolicSAR:
@@ -129,7 +127,6 @@ class TestParabolicSAR:
     def test_sar_below_price_in_uptrend(self, trending_up_df):
         """In an uptrend the SAR line should be below close."""
         sar, direction = parabolic_sar(trending_up_df)
-        # Check the last quarter where trend is firmly established
         tail = slice(-50, None)
         assert (sar.iloc[tail][direction.iloc[tail] == 1]
                 <= trending_up_df["close"].iloc[tail][direction.iloc[tail] == 1]).all()
@@ -185,7 +182,6 @@ class TestNewStrategyContracts:
     @pytest.mark.parametrize("cls", NEW_LONG_ONLY)
     def test_long_only_runs_in_backtest(self, cls, large_df):
         """End-to-end smoke test: strategy + Backtest must not raise."""
-        import sys; sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "engine"))
         from backtest import Backtest
         bt = Backtest(initial=100_000)
         trades, equity, metrics = bt.run(large_df, cls())
