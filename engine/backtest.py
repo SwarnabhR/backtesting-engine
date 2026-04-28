@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 from risk import compute_metrics, BacktestMetrics
+from sizer import PositionSizer, FixedSizer
 
 
 class Backtest:
@@ -11,23 +12,28 @@ class Backtest:
     Signal contract
     ---------------
     Strategies may return either:
-      - A 2-tuple ``(entries, exits)``          → long-only (original behaviour)
+      - A 2-tuple ``(entries, exits)``             → long-only
       - A 4-tuple ``(long_entries, long_exits,
-                     short_entries, short_exits)`` → long/short mode
+                     short_entries, short_exits)``  → long/short
 
-    Both ``entries``/``exits`` variants are boolean ``pd.Series`` aligned
-    to *df*'s index.
+    Position sizing
+    ---------------
+    Pass any :class:`sizer.PositionSizer` subclass as *sizer*.
+    Defaults to :class:`sizer.FixedSizer` (1 share) for backward compat.
 
-    Position encoding
-    -----------------
-      0  = flat
-      1  = long
-     -1  = short
+    The legacy ``position_size: int`` kwarg is still accepted and is
+    converted to ``FixedSizer(position_size)`` automatically.
     """
 
-    def __init__(self, initial: float = 10_000, position_size: int = 1) -> None:
+    def __init__(
+        self,
+        initial: float = 10_000,
+        position_size: int = 1,       # kept for back-compat
+        sizer: PositionSizer | None = None,
+    ) -> None:
         self.initial = initial
-        self.position_size = position_size
+        # sizer takes priority; fall back to FixedSizer(position_size)
+        self.sizer: PositionSizer = sizer if sizer is not None else FixedSizer(position_size)
 
     # ------------------------------------------------------------------
     # Public API
@@ -37,7 +43,6 @@ class Backtest:
         self, df: pd.DataFrame, strategy
     ) -> tuple[pd.DataFrame, pd.Series, BacktestMetrics]:
         signals = strategy.generate_signals(df)
-
         if len(signals) == 4:
             return self._run_long_short(df, *signals)
         elif len(signals) == 2:
@@ -48,7 +53,7 @@ class Backtest:
             )
 
     # ------------------------------------------------------------------
-    # Long-only (original behaviour, unchanged)
+    # Long-only
     # ------------------------------------------------------------------
 
     def _run_long_only(
@@ -57,35 +62,39 @@ class Backtest:
         entries: pd.Series,
         exits: pd.Series,
     ) -> tuple[pd.DataFrame, pd.Series, BacktestMetrics]:
-        position = 0
-        entry_date = None
+        position  = 0
+        entry_date  = None
         entry_price = None
+        shares_held = 0
         trades: list[dict] = []
         equity_values: list[float] = []
+        realised_pnl = 0.0
 
         for i in range(1, len(df)):
             close = df["close"].iloc[i]
-            date = df.index[i]
+            date  = df.index[i]
+            bar   = df.iloc[i]
+            current_equity = self.initial + realised_pnl
 
             if entries.iloc[i] and position == 0:
-                position = 1
-                entry_date = date
+                shares_held = self.sizer.size(current_equity, bar)
+                position    = 1
+                entry_date  = date
                 entry_price = close
 
             elif exits.iloc[i] and position == 1:
-                pnl = (close - entry_price) * self.position_size
+                pnl = (close - entry_price) * shares_held
+                realised_pnl += pnl
                 trades.append(
                     self._trade_record(
-                        entry_date, date, entry_price, close, "long", pnl
+                        entry_date, date, entry_price, close,
+                        "long", pnl, shares_held
                     )
                 )
                 position = 0
 
-            unrealized = (
-                (close - entry_price) * self.position_size if position == 1 else 0.0
-            )
-            equity = self.initial + sum(t["pnl"] for t in trades) + unrealized
-            equity_values.append(equity)
+            unrealized = (close - entry_price) * shares_held if position == 1 else 0.0
+            equity_values.append(self.initial + realised_pnl + unrealized)
 
         return self._finalise(trades, equity_values, df)
 
@@ -101,31 +110,39 @@ class Backtest:
         short_entries: pd.Series,
         short_exits: pd.Series,
     ) -> tuple[pd.DataFrame, pd.Series, BacktestMetrics]:
-        position = 0       # 0=flat, 1=long, -1=short
-        entry_date = None
+        position    = 0       # 0=flat, 1=long, -1=short
+        entry_date  = None
         entry_price = None
+        shares_held = 0
         trades: list[dict] = []
         equity_values: list[float] = []
+        realised_pnl = 0.0
 
         for i in range(1, len(df)):
             close = df["close"].iloc[i]
-            date = df.index[i]
+            date  = df.index[i]
+            bar   = df.iloc[i]
+            current_equity = self.initial + realised_pnl
 
-            # --- exit any open position first ---
+            # --- exit first ---
             if position == 1 and long_exits.iloc[i]:
-                pnl = (close - entry_price) * self.position_size
+                pnl = (close - entry_price) * shares_held
+                realised_pnl += pnl
                 trades.append(
                     self._trade_record(
-                        entry_date, date, entry_price, close, "long", pnl
+                        entry_date, date, entry_price, close,
+                        "long", pnl, shares_held
                     )
                 )
                 position = 0
 
             elif position == -1 and short_exits.iloc[i]:
-                pnl = (entry_price - close) * self.position_size
+                pnl = (entry_price - close) * shares_held
+                realised_pnl += pnl
                 trades.append(
                     self._trade_record(
-                        entry_date, date, entry_price, close, "short", pnl
+                        entry_date, date, entry_price, close,
+                        "short", pnl, shares_held
                     )
                 )
                 position = 0
@@ -133,35 +150,37 @@ class Backtest:
             # --- enter new position (only when flat) ---
             if position == 0:
                 if long_entries.iloc[i]:
-                    position = 1
-                    entry_date = date
+                    shares_held = self.sizer.size(current_equity, bar)
+                    position    = 1
+                    entry_date  = date
                     entry_price = close
                 elif short_entries.iloc[i]:
-                    position = -1
-                    entry_date = date
+                    shares_held = self.sizer.size(current_equity, bar)
+                    position    = -1
+                    entry_date  = date
                     entry_price = close
 
-            # unrealized P&L for equity curve
+            # unrealized P&L
             if position == 1:
-                unrealized = (close - entry_price) * self.position_size
+                unrealized = (close - entry_price) * shares_held
             elif position == -1:
-                unrealized = (entry_price - close) * self.position_size
+                unrealized = (entry_price - close) * shares_held
             else:
                 unrealized = 0.0
 
-            equity = self.initial + sum(t["pnl"] for t in trades) + unrealized
-            equity_values.append(equity)
+            equity_values.append(self.initial + realised_pnl + unrealized)
 
         return self._finalise(trades, equity_values, df)
 
     # ------------------------------------------------------------------
-    # Shared helpers
+    # Helpers
     # ------------------------------------------------------------------
 
     @staticmethod
     def _trade_record(
-        entry_date, exit_date, entry_price: float, exit_price: float,
-        direction: str, pnl: float
+        entry_date, exit_date,
+        entry_price: float, exit_price: float,
+        direction: str, pnl: float, shares: int,
     ) -> dict:
         pnl_pct = (
             (exit_price - entry_price) / entry_price
@@ -169,14 +188,14 @@ class Backtest:
             else (entry_price - exit_price) / entry_price
         )
         return {
-            "entry_date": entry_date,
-            "exit_date": exit_date,
+            "entry_date":  entry_date,
+            "exit_date":   exit_date,
             "entry_price": entry_price,
-            "exit_price": exit_price,
-            "direction": direction,
-            "shares": 0,          # kept for schema compatibility
-            "pnl": pnl,
-            "pnl_pct": pnl_pct,
+            "exit_price":  exit_price,
+            "direction":   direction,
+            "shares":      shares,
+            "pnl":         pnl,
+            "pnl_pct":     pnl_pct,
         }
 
     def _finalise(
@@ -185,7 +204,7 @@ class Backtest:
         equity_values: list[float],
         df: pd.DataFrame,
     ) -> tuple[pd.DataFrame, pd.Series, BacktestMetrics]:
-        trades_df = pd.DataFrame(trades)
+        trades_df    = pd.DataFrame(trades)
         equity_curve = pd.Series(equity_values, index=df.index[1:])
-        metrics = compute_metrics(trades_df, equity_curve)
+        metrics      = compute_metrics(trades_df, equity_curve)
         return trades_df, equity_curve, metrics
