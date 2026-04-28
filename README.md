@@ -11,8 +11,10 @@ Built in pure Python/Pandas — no `backtrader`, no `vectorbt`.
 engine/
 ├── data.py            # yfinance OHLCV fetcher
 ├── indicators.py      # EMA, RSI, MACD, Bollinger, ATR, VWAP, trend_regime
-├── strategy.py        # 12 strategy classes (long-only, L/S, regime-filtered)
+│                      # Supertrend, Ichimoku, Williams %R, Donchian, PSAR
+├── strategy.py        # 27 strategy classes (long-only, L/S, regime-filtered)
 ├── backtest.py        # Event-driven engine (2-tuple and 4-tuple signal contract)
+├── portfolio.py       # PortfolioBacktest — multi-asset, 3 allocation modes
 ├── risk.py            # Sharpe, CAGR, max drawdown, win rate, total return
 ├── sizer.py           # FixedSizer, PercentEquitySizer, ATRSizer, KellySizer
 ├── costs.py           # NoCost, FixedCommission, PercentCommission,
@@ -30,7 +32,9 @@ tests/
 ├── test_sizer.py
 ├── test_optimizer.py
 ├── test_strategies.py
-└── test_costs.py
+├── test_costs.py
+├── test_new_indicators.py
+└── test_portfolio.py
 ```
 
 ---
@@ -51,6 +55,78 @@ tests/
 | `MACDCrossover` | Long-only | MACD/signal crossover |
 | `MACDCrossoverLS` | Long/short | Always in market |
 | `MACDCrossoverRegime` | Regime-filtered | Bullish cross in bull, bearish cross in bear |
+| `SupertrendStrategy` | Long-only | Wilder Supertrend direction flip |
+| `SupertrendLS` | Long/short | Reverses on direction flip |
+| `SupertrendRegime` | Regime-filtered | Regime-gated Supertrend |
+| `IchimokuStrategy` | Long-only | TK cross above the cloud |
+| `IchimokuLS` | Long/short | TK cross + cloud-position filter |
+| `IchimokuRegime` | Regime-filtered | Regime-gated Ichimoku |
+| `WilliamsRStrategy` | Long-only | %R crosses -80 oversold threshold |
+| `WilliamsRLS` | Long/short | Adds overbought short leg |
+| `WilliamsRRegime` | Regime-filtered | Regime-gated Williams %R |
+| `DonchianBreakout` | Long-only | Turtle Trading N-bar channel breakout |
+| `DonchianBreakoutLS` | Long/short | Upper breakout long / lower breakdown short |
+| `DonchianBreakoutRegime` | Regime-filtered | Regime-gated Donchian |
+| `PSARStrategy` | Long-only | Parabolic SAR uptrend flip |
+| `PSARLS` | Long/short | Reverses on SAR direction flip |
+| `PSARRegime` | Regime-filtered | Regime-gated PSAR |
+
+---
+
+## Multi-Asset Portfolio
+
+```python
+from portfolio import PortfolioBacktest, EqualWeightSizer, VolTargetSizer, run_portfolio
+from strategy import SupertrendRegime
+from costs import nse_equity_delivery
+
+dfs = {
+    "RELIANCE.NS": rel_df,
+    "INFY.NS":     inf_df,
+    "HDFCBANK.NS": hdf_df,
+    "TCS.NS":      tcs_df,
+}
+
+# Equal-weight, NSE delivery costs
+pb = PortfolioBacktest(
+    initial=1_000_000,
+    portfolio_sizer=EqualWeightSizer(),
+    cost_model=nse_equity_delivery(),
+)
+result = pb.run(dfs, strategy_class=SupertrendRegime)
+
+print(result.metrics)           # portfolio-level Sharpe, CAGR, drawdown
+print(result.symbol_metrics)    # per-symbol breakdown dict
+result.equity_curve.plot()      # combined equity
+
+# Inverse-volatility allocation (rebalance monthly)
+pb2 = PortfolioBacktest(
+    initial=1_000_000,
+    portfolio_sizer=VolTargetSizer(lookback=20, rebalance_bars=21, cap=0.40),
+)
+result2 = pb2.run(dfs, SupertrendRegime)
+
+# Per-symbol strategy parameters
+pb3 = PortfolioBacktest(
+    initial=1_000_000,
+    strategy_kwargs={
+        "RELIANCE.NS": {"period": 7,  "multiplier": 2.5},
+        "INFY.NS":     {"period": 10, "multiplier": 3.0},
+    },
+)
+result3 = pb3.run(dfs, SupertrendRegime)
+
+# One-liner
+result4 = run_portfolio(dfs, SupertrendRegime, initial=1_000_000)
+```
+
+### Allocation Modes
+
+| Sizer | Logic | Best for |
+|---|---|---|
+| `EqualWeightSizer(cap=1.0)` | 1/N per symbol | Baseline |
+| `FixedWeightSizer({sym: w})` | User-supplied static weights | Conviction-based |
+| `VolTargetSizer(lookback, rebalance_bars, cap)` | Inverse-volatility, rebalanced periodically | Risk-parity |
 
 ---
 
@@ -125,6 +201,7 @@ When a cost model is active, `trades_df` gains two new columns:
 from indicators import atr
 from strategy import EMACrossoverRegime
 from backtest import Backtest
+from portfolio import PortfolioBacktest, EqualWeightSizer
 from sizer import ATRSizer
 from costs import nse_equity_intraday
 from optimizer import GridOptimizer
@@ -136,7 +213,7 @@ df = yf.download("^NSEI", start="2019-01-01", end="2025-01-01")
 df.columns = [c[0].lower() for c in df.columns]
 df["atr"] = atr(df, period=14)
 
-# Full realistic backtest
+# Full realistic single-asset backtest
 bt = Backtest(
     initial=100_000,
     sizer=ATRSizer(risk_pct=0.01, atr_mult=2.0),
@@ -144,7 +221,17 @@ bt = Backtest(
 )
 trades, equity, metrics = bt.run(df, EMACrossoverRegime())
 print(metrics)
-print(trades[["entry_date","exit_date","shares","gross_pnl","cost","pnl"]].tail())
+
+# Multi-asset portfolio
+dfs = {sym: yf.download(sym, start="2019-01-01", end="2025-01-01") for sym in
+       ["RELIANCE.NS", "INFY.NS", "HDFCBANK.NS"]}
+for sym in dfs:
+    dfs[sym].columns = [c[0].lower() for c in dfs[sym].columns]
+
+pb = PortfolioBacktest(initial=500_000, portfolio_sizer=EqualWeightSizer())
+result = pb.run(dfs, EMACrossoverRegime)
+print(result.metrics)
+print(result.symbol_metrics)
 
 # Grid search
 opt = GridOptimizer(
@@ -172,7 +259,7 @@ plot_walk_forward(result, save_path="output/wfv.png")
 
 ```bash
 pip install pytest pandas numpy
-pytest          # runs all ~95 tests, no network required
+pytest          # runs all tests, no network required
 ```
 
 ---
@@ -181,22 +268,15 @@ pytest          # runs all ~95 tests, no network required
 
 - [x] Data fetching
 - [x] Core indicators: EMA, RSI, MACD, Bollinger, ATR, VWAP, trend regime
-- [x] Long-only, long/short, and regime-filtered strategies (12 total)
+- [x] Extended indicators: Supertrend, Ichimoku, Williams %R, Donchian, PSAR
+- [x] Long-only, long/short, and regime-filtered strategies (27 total)
 - [x] Grid-search optimiser with constraint support
 - [x] Walk-forward validation (anchored + rolling, warmup-aware)
 - [x] Position sizing: Fixed, PercentEquity, ATR-based, Kelly
 - [x] Results visualisation: equity curve, drawdown, per-fold OOS, optimizer scatter
-- [x] pytest unit test suite (~95 tests, synthetic OHLCV fixtures)
+- [x] pytest unit test suite (synthetic OHLCV fixtures, no network)
 - [x] Commission / slippage cost model (Fixed, Percent, Tick, Composite, NSE presets)
-
----
-
-## Requirements
-
-```
-pandas
-numpy
-yfinance
-matplotlib
-pytest
-```
+- [x] Multi-asset portfolio backtester (Equal, Fixed, Vol-Target allocation)
+- [ ] Live paper-trading hook (broker API adapter interface)
+- [ ] Intraday / minute-bar support
+- [ ] Regime-aware portfolio rebalancing
