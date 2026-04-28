@@ -31,12 +31,13 @@ ema_opt = GridOptimizer(
     },
     initial=100_000,
     min_trades=3,
+    constraint=lambda p: p["fast"] < p["slow"],  # enforce fast < slow
 )
 ema_results = ema_opt.run(df, sort_by="sharpe_ratio")
 print(ema_results.head(5).to_string(index=False))
 best_ema = ema_opt.best(df, sort_by="sharpe_ratio")
 if best_ema:
-    print(f"\nBest EMA params: {best_ema.params}  →  Sharpe {best_ema.sharpe_ratio:.2f}")
+    print(f"\n{best_ema}")
 
 # ── Grid Search: RSI Mean Reversion ─────────────────────────────────────────
 print("\n=== Grid Search: RSI Mean Reversion ===")
@@ -49,12 +50,13 @@ rsi_opt = GridOptimizer(
     },
     initial=100_000,
     min_trades=3,
+    constraint=lambda p: p["oversold"] < p["overbought"],  # logical guard
 )
 rsi_results = rsi_opt.run(df, sort_by="cagr")
 print(rsi_results.head(5).to_string(index=False))
 best_rsi = rsi_opt.best(df, sort_by="cagr")
 if best_rsi:
-    print(f"\nBest RSI params: {best_rsi.params}  →  CAGR {best_rsi.cagr:.2%}")
+    print(f"\n{best_rsi}")
 
 # ── Grid Search: Bollinger Breakout ─────────────────────────────────────────
 print("\n=== Grid Search: Bollinger Breakout ===")
@@ -71,4 +73,4 @@ bb_results = bb_opt.run(df, sort_by="sharpe_ratio")
 print(bb_results.head(5).to_string(index=False))
 best_bb = bb_opt.best(df, sort_by="sharpe_ratio")
 if best_bb:
-    print(f"\nBest BB params: {best_bb.params}  →  Sharpe {best_bb.sharpe_ratio:.2f}")
+    print(f"\n{best_bb}")
