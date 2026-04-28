@@ -7,14 +7,37 @@ def ema(series: pd.Series, period: int) -> pd.Series:
 
 
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    """
+    Wilder RSI.
+
+    Edge cases handled:
+    - All-gains window (pure uptrend): avg_loss == 0  → RSI = 100
+    - All-losses window (pure downtrend): avg_gain == 0 → RSI = 0
+    - Both zero (flat/constant): RSI = 50 (neutral)
+    """
     period = int(period)
     delta = series.diff()
     gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
+    loss = (-delta).clip(lower=0)
+
     avg_gain = gain.rolling(window=period, min_periods=period).mean()
     avg_loss = loss.rolling(window=period, min_periods=period).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
+
+    # Build RSI bar-by-bar to handle the three edge cases cleanly
+    rsi_vals = pd.Series(np.nan, index=series.index)
+
+    both_zero = (avg_gain == 0) & (avg_loss == 0)
+    all_gain   = (avg_loss == 0) & (avg_gain > 0)
+    all_loss   = (avg_gain == 0) & (avg_loss > 0)
+    normal     = (avg_gain > 0) & (avg_loss > 0)
+
+    rsi_vals[both_zero] = 50.0
+    rsi_vals[all_gain]  = 100.0
+    rsi_vals[all_loss]  = 0.0
+    rs = avg_gain[normal] / avg_loss[normal]
+    rsi_vals[normal] = 100 - (100 / (1 + rs))
+
+    return rsi_vals
 
 
 def macd(
@@ -50,17 +73,6 @@ def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
 
     True Range = max(high-low, |high-prev_close|, |low-prev_close|)
     ATR        = EMA(TR, period)
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Must contain columns ``"high"``, ``"low"``, ``"close"``.
-    period : int
-        Smoothing period (default 14).
-
-    Returns
-    -------
-    pd.Series  aligned to df.index, NaN for first ``period`` bars.
     """
     period = int(period)
     high  = df["high"]
@@ -97,25 +109,8 @@ def trend_regime(
     Method
     ------
     1. Compute a simple moving average of length *ma_period*.
-    2. Measure the MA's slope over the last *slope_period* bars as a
-       percentage:  slope = (MA_now - MA_n_bars_ago) / MA_n_bars_ago
-    3. Threshold:
-         slope >  0  -> bull  (+1)  -- MA is rising
-         slope <  0  -> bear  (-1)  -- MA is falling
-         NaN (warmup period) -> neutral (0)
-
-    Parameters
-    ----------
-    series : pd.Series
-        Close prices.
-    ma_period : int
-        Lookback for the trend-defining moving average (default 200).
-    slope_period : int
-        Number of bars over which the MA slope is measured (default 20).
-
-    Returns
-    -------
-    pd.Series of int  {-1, 0, +1}  aligned to *series* index.
+    2. Measure the MA's slope over the last *slope_period* bars.
+    3. slope > 0 → bull (+1); slope < 0 → bear (-1); warmup → neutral (0).
     """
     ma_period    = int(ma_period)
     slope_period = int(slope_period)
