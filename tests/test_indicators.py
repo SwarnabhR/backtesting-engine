@@ -20,7 +20,6 @@ class TestEMA:
     def test_smoothing(self, trending_up_df):
         """EMA should be below close in an uptrend (lagging indicator)."""
         result = ema(trending_up_df["close"], 20)
-        # after warmup the EMA should trail the rising price
         assert result.iloc[-1] < trending_up_df["close"].iloc[-1]
 
     def test_flat_equals_price(self, flat_df):
@@ -44,13 +43,23 @@ class TestRSI:
         assert len(rsi(oscillating_df["close"], 14)) == len(oscillating_df)
 
     def test_uptrend_high_rsi(self, trending_up_df):
-        """A steep uptrend should produce RSI > 50 after warmup."""
+        """A steep uptrend should produce RSI > 50 after warmup.
+
+        RSI(14) needs 15 bars to emit its first value, then converges over
+        ~28 bars.  Use iloc[-1] on the non-NaN slice, but guard that the
+        slice is actually non-empty before asserting.
+        """
         result = rsi(trending_up_df["close"], 14)
-        assert result.dropna().iloc[-1] > 50
+        valid = result.dropna()
+        # trending_up_df has 300 bars — plenty of warmup
+        assert len(valid) > 0, "RSI returned all NaN — check indicator warmup"
+        assert valid.iloc[-1] > 50
 
     def test_downtrend_low_rsi(self, trending_down_df):
         result = rsi(trending_down_df["close"], 14)
-        assert result.dropna().iloc[-1] < 50
+        valid = result.dropna()
+        assert len(valid) > 0
+        assert valid.iloc[-1] < 50
 
 
 class TestMACD:
@@ -89,7 +98,6 @@ class TestBollingerBands:
     def test_flat_zero_bandwidth(self, flat_df):
         """A flat series has zero std → upper == lower == mid."""
         upper, mid, lower = bollinger_bands(flat_df["close"], period=10)
-        # after warmup all three should be ~100
         np.testing.assert_allclose(upper.iloc[15:], 100.0, rtol=1e-5)
         np.testing.assert_allclose(lower.iloc[15:], 100.0, rtol=1e-5)
 
