@@ -9,14 +9,12 @@ from optimizer import GridOptimizer
 from walk_forward import WalkForwardValidator
 import yfinance as yf
 
-# Download 5 years so walk-forward has enough folds
+# 6 years: enough for multiple WFV folds even with 200-bar warmup
 df = yf.download("^NSEI", start="2019-01-01", end="2025-01-01")
 df.columns = [c[0].lower() for c in df.columns]
 
-# 3-year slice for the quick strategy comparison table
-df3 = df["2022":"2024"]
-
-bt = Backtest(initial=100_000)
+df3 = df["2022":"2024"]   # 3-year slice for quick comparison table
+bt  = Backtest(initial=100_000)
 
 
 def show(label: str, m) -> None:
@@ -38,22 +36,23 @@ trios = [
 ]
 for name, lo, ls, rg in trios:
     print(f"\n{name}")
-    show("Long-only",        bt.run(df3, lo)[2])
-    show("Long/short",       bt.run(df3, ls)[2])
-    show("Regime-filtered",  bt.run(df3, rg)[2])
+    show("Long-only",       bt.run(df3, lo)[2])
+    show("Long/short",      bt.run(df3, ls)[2])
+    show("Regime-filtered", bt.run(df3, rg)[2])
 
 
-# ── Walk-Forward: EMA Crossover (anchored, 2-yr IS / 6-mo OOS) ──────────────
-print("\n=== Walk-Forward: EMACrossover (anchored) ===")
+# ── Walk-Forward: EMACrossover — anchored, no warmup needed ────────────────
+print("\n=== Walk-Forward: EMACrossover (anchored, 2-yr IS / 1-yr OOS) ===")
 wfv_ema = WalkForwardValidator(
     strategy_class=EMACrossover,
     param_grid={"fast": [5, 8, 10, 12], "slow": [20, 26, 30, 50]},
     is_bars=504,      # ~2 trading years
-    oos_bars=126,     # ~6 trading months
+    oos_bars=252,     # ~1 trading year  ← raised from 6mo; more OOS trades
+    warmup_bars=0,
     anchored=True,
     sort_by="sharpe_ratio",
     initial=100_000,
-    min_trades=3,
+    min_trades=2,
     constraint=lambda p: p["fast"] < p["slow"],
 )
 wf_ema = wfv_ema.run(df)
@@ -61,8 +60,8 @@ print(wf_ema.summary.to_string(index=False))
 print(f"\n{wf_ema}")
 
 
-# ── Walk-Forward: EMACrossoverRegime (rolling, 1.5-yr IS / 6-mo OOS) ───────
-print("\n=== Walk-Forward: EMACrossoverRegime (rolling) ===")
+# ── Walk-Forward: EMACrossoverRegime — rolling, warmup_bars=200 ────────────
+print("\n=== Walk-Forward: EMACrossoverRegime (rolling, 1.5-yr IS / 1-yr OOS) ===")
 wfv_regime = WalkForwardValidator(
     strategy_class=EMACrossoverRegime,
     param_grid={
@@ -70,12 +69,13 @@ wfv_regime = WalkForwardValidator(
         "slow":         [20, 26, 50],
         "regime_slope": [10, 20, 30],
     },
-    is_bars=378,      # ~1.5 trading years
-    oos_bars=126,     # ~6 trading months
-    anchored=False,   # rolling window — more recent data weighted equally
+    is_bars=378,      # ~1.5 yr of usable bars (after warmup is accounted for)
+    oos_bars=252,     # ~1 yr
+    warmup_bars=200,  # 200-bar SMA needs 200 bars before first valid value
+    anchored=False,
     sort_by="sharpe_ratio",
     initial=100_000,
-    min_trades=3,
+    min_trades=2,
     constraint=lambda p: p["fast"] < p["slow"],
 )
 wf_regime = wfv_regime.run(df)
@@ -83,8 +83,8 @@ print(wf_regime.summary.to_string(index=False))
 print(f"\n{wf_regime}")
 
 
-# ── Walk-Forward: RSIMeanReversionRegime (anchored) ───────────────────────
-print("\n=== Walk-Forward: RSIMeanReversionRegime (anchored) ===")
+# ── Walk-Forward: RSIMeanReversionRegime — anchored, warmup_bars=200 ───────
+print("\n=== Walk-Forward: RSIMeanReversionRegime (anchored, 2-yr IS / 1-yr OOS) ===")
 wfv_rsi = WalkForwardValidator(
     strategy_class=RSIMeanReversionRegime,
     param_grid={
@@ -94,11 +94,12 @@ wfv_rsi = WalkForwardValidator(
         "regime_slope": [10, 20],
     },
     is_bars=504,
-    oos_bars=126,
+    oos_bars=252,
+    warmup_bars=200,
     anchored=True,
     sort_by="sharpe_ratio",
     initial=100_000,
-    min_trades=3,
+    min_trades=2,
     constraint=lambda p: p["oversold"] < p["overbought"],
 )
 wf_rsi = wfv_rsi.run(df)
