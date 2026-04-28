@@ -6,10 +6,15 @@ from strategy import (
     MACDCrossover,       MACDCrossoverLS,        MACDCrossoverRegime,
 )
 from optimizer import GridOptimizer
+from walk_forward import WalkForwardValidator
 import yfinance as yf
 
-df = yf.download("^NSEI", start="2022-01-01", end="2025-01-01")
+# Download 5 years so walk-forward has enough folds
+df = yf.download("^NSEI", start="2019-01-01", end="2025-01-01")
 df.columns = [c[0].lower() for c in df.columns]
+
+# 3-year slice for the quick strategy comparison table
+df3 = df["2022":"2024"]
 
 bt = Backtest(initial=100_000)
 
@@ -19,8 +24,8 @@ def show(label: str, m) -> None:
           f"DD {m.max_drawdown_pct:.2%} | WR {m.win_rate:.2%} | Trades {m.total_trades}")
 
 
-# ── 3-way comparison ───────────────────────────────────────────────────────────
-print("\n=== Long-only  vs  Long/Short  vs  Regime-Filtered ===")
+# ── 3-way comparison (2022–2024) ────────────────────────────────────────────────
+print("\n=== Long-only  vs  Long/Short  vs  Regime-Filtered (2022–2024) ===")
 trios = [
     ("EMA Crossover",
         EMACrossover(), EMACrossoverLS(), EMACrossoverRegime()),
@@ -33,40 +38,69 @@ trios = [
 ]
 for name, lo, ls, rg in trios:
     print(f"\n{name}")
-    show("Long-only",        bt.run(df, lo)[2])
-    show("Long/short",       bt.run(df, ls)[2])
-    show("Regime-filtered",  bt.run(df, rg)[2])
+    show("Long-only",        bt.run(df3, lo)[2])
+    show("Long/short",       bt.run(df3, ls)[2])
+    show("Regime-filtered",  bt.run(df3, rg)[2])
 
-# ── Grid Search: best regime-filtered strategy ──────────────────────────────
-print("\n=== Grid Search: EMACrossoverRegime ===")
-ema_opt = GridOptimizer(
-    strategy_class=EMACrossoverRegime,
-    param_grid={
-        "fast":          [5, 8, 10, 12],
-        "slow":          [20, 26, 30, 50],
-        "regime_slope":  [10, 20, 30],
-    },
+
+# ── Walk-Forward: EMA Crossover (anchored, 2-yr IS / 6-mo OOS) ──────────────
+print("\n=== Walk-Forward: EMACrossover (anchored) ===")
+wfv_ema = WalkForwardValidator(
+    strategy_class=EMACrossover,
+    param_grid={"fast": [5, 8, 10, 12], "slow": [20, 26, 30, 50]},
+    is_bars=504,      # ~2 trading years
+    oos_bars=126,     # ~6 trading months
+    anchored=True,
+    sort_by="sharpe_ratio",
     initial=100_000,
     min_trades=3,
     constraint=lambda p: p["fast"] < p["slow"],
 )
-ema_results = ema_opt.run(df, sort_by="sharpe_ratio")
-print(ema_results.head(5).to_string(index=False))
-print(f"\n{ema_opt.best(df)}")
+wf_ema = wfv_ema.run(df)
+print(wf_ema.summary.to_string(index=False))
+print(f"\n{wf_ema}")
 
-print("\n=== Grid Search: RSIMeanReversionRegime ===")
-rsi_opt = GridOptimizer(
+
+# ── Walk-Forward: EMACrossoverRegime (rolling, 1.5-yr IS / 6-mo OOS) ───────
+print("\n=== Walk-Forward: EMACrossoverRegime (rolling) ===")
+wfv_regime = WalkForwardValidator(
+    strategy_class=EMACrossoverRegime,
+    param_grid={
+        "fast":         [5, 8, 12],
+        "slow":         [20, 26, 50],
+        "regime_slope": [10, 20, 30],
+    },
+    is_bars=378,      # ~1.5 trading years
+    oos_bars=126,     # ~6 trading months
+    anchored=False,   # rolling window — more recent data weighted equally
+    sort_by="sharpe_ratio",
+    initial=100_000,
+    min_trades=3,
+    constraint=lambda p: p["fast"] < p["slow"],
+)
+wf_regime = wfv_regime.run(df)
+print(wf_regime.summary.to_string(index=False))
+print(f"\n{wf_regime}")
+
+
+# ── Walk-Forward: RSIMeanReversionRegime (anchored) ───────────────────────
+print("\n=== Walk-Forward: RSIMeanReversionRegime (anchored) ===")
+wfv_rsi = WalkForwardValidator(
     strategy_class=RSIMeanReversionRegime,
     param_grid={
-        "period":        [10, 14, 20],
-        "oversold":      [25, 30, 35],
-        "overbought":    [65, 70, 75],
-        "regime_slope":  [10, 20, 30],
+        "period":       [10, 14, 20],
+        "oversold":     [25, 30, 35],
+        "overbought":   [65, 70, 75],
+        "regime_slope": [10, 20],
     },
+    is_bars=504,
+    oos_bars=126,
+    anchored=True,
+    sort_by="sharpe_ratio",
     initial=100_000,
     min_trades=3,
     constraint=lambda p: p["oversold"] < p["overbought"],
 )
-rsi_results = rsi_opt.run(df, sort_by="sharpe_ratio")
-print(rsi_results.head(5).to_string(index=False))
-print(f"\n{rsi_opt.best(df)}")
+wf_rsi = wfv_rsi.run(df)
+print(wf_rsi.summary.to_string(index=False))
+print(f"\n{wf_rsi}")
